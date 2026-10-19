@@ -19,7 +19,7 @@ elif [[ "\${3:-}" == "e2b" ]]; then
 elif [[ "\${3:-}" == "opik" ]]; then
   printf '%s\n' '$opik_version'
 elif [[ "\${3:-}" == "yicloud-sdk-python" ]]; then
-  printf '%s\n' '0.3.1'
+  printf '%s\n' '0.4.1'
 elif [[ "\${3:-}" == "pip" ]]; then
   printf '%s\n' '25.2'
 elif [[ "\${3:-}" == "PyYAML" ]]; then

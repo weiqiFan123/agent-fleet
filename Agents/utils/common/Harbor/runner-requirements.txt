@@ -9,4 +9,4 @@ opik==2.1.32
 pip==25.2
 PyYAML==6.0.3
 s3cmd==2.4.0
-yicloud-sdk-python==0.3.1
+yicloud-sdk-python==0.4.1

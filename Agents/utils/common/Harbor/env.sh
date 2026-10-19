@@ -1540,6 +1540,7 @@ harbor_prepare_or_select_wheels() {
 
 harbor_prepare_agent_runtime() {
   if harbor_agent_is_oracle \
+    || [[ "$ROLLOUT" == "1" && "$RL_AGENT" == "Vanillux2Agent" ]] \
     || [[ "$ROLLOUT" == "1" && "$RL_AGENT" == "oracle" ]] \
     || [[ "$HARBOR_ENVIRONMENT_TYPE" == "e2b" || "$HARBOR_ENVIRONMENT_TYPE" == "qz" ]]; then
     mkdir -p "$RUNTIME_DIR"

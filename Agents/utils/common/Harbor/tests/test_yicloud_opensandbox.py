@@ -113,6 +113,46 @@ class FakeSandbox:
 
 
 class YiCloudOpenSandboxTest(unittest.TestCase):
+    def test_environment_id_is_used_without_lookup_even_when_name_is_set(self) -> None:
+        sandbox = FakeSandbox(
+            [SimpleNamespace(Id="env-dedicated", Name="dedicated-test-environment")]
+        )
+        sandbox.list_sandbox_environments = Mock(
+            side_effect=AssertionError("environment list must not be called")
+        )
+        sandbox.get_sandbox_environment = Mock(
+            side_effect=AssertionError("environment lookup must not be called")
+        )
+        instance = object.__new__(
+            yicloud_opensandbox.YiCloudOpenSandboxEnvironment
+        )
+        instance._sandbox_service = sandbox
+        instance._project_name = "test-project"
+        instance._environment_id = "env-dedicated"
+        instance._environment_name = "dedicated-test-environment"
+
+        self.assertEqual(instance._resolve_environment_id(), "env-dedicated")
+        sandbox.list_sandbox_environments.assert_not_called()
+        sandbox.get_sandbox_environment.assert_not_called()
+
+    def test_environment_name_lists_only_without_id(self) -> None:
+        sandbox = FakeSandbox(
+            [SimpleNamespace(Id="env-dedicated", Name="dedicated-test-environment")]
+        )
+        sandbox.list_sandbox_environments = Mock(
+            wraps=sandbox.list_sandbox_environments
+        )
+        instance = object.__new__(
+            yicloud_opensandbox.YiCloudOpenSandboxEnvironment
+        )
+        instance._sandbox_service = sandbox
+        instance._project_name = "test-project"
+        instance._environment_id = ""
+        instance._environment_name = "dedicated-test-environment"
+
+        self.assertEqual(instance._resolve_environment_id(), "env-dedicated")
+        sandbox.list_sandbox_environments.assert_called_once()
+
     def test_v2_bundle_loads_digest_refs_and_rejects_unsupported_capabilities(self) -> None:
         instance = object.__new__(
             yicloud_opensandbox.YiCloudOpenSandboxEnvironment

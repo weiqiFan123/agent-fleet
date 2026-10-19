@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
+import logging
 import os
 import re
 import shlex
@@ -34,7 +36,7 @@ from harbor.environments.capabilities import (
 )
 from opensandbox_s3_upload import S3UploadArtifact, S3UploadStore
 
-EXPECTED_YICLOUD_SDK_VERSION = "0.3.1"
+EXPECTED_YICLOUD_SDK_VERSION = "0.4.1"
 EXIT_MARKER = "__HARBOR_YICLOUD_OPENSANDBOX_EXIT_CODE__="
 TERMINAL_FAILURE_STATES = {
     "failed",
@@ -207,7 +209,7 @@ def _bypass_local_proxy_for_api_host() -> None:
 def _state_of(data: Any) -> str:
     status = getattr(data, "Status", None)
     state = getattr(status, "State", "") or getattr(data, "RunState", "")
-    # yicloud-sdk-python 0.3.1 declares lowercase state values, while older
+    # Current yicloud-sdk-python versions declare lowercase state values, while older
     # gateways returned title-case values. Normalize both representations so a
     # running sandbox is not mistaken for a pending one until ready timeout.
     return str(state or "").strip().lower()
@@ -689,35 +691,16 @@ class YiCloudOpenSandboxEnvironment(BaseEnvironment):
                 "YICLOUD_SANDBOX_ENVIRONMENT_ID or "
                 "YICLOUD_SANDBOX_ENVIRONMENT_NAME"
             )
-        if self._environment_name:
+        # An explicit ID is authoritative. Use it as configured without an
+        # environment lookup; high-concurrency rollout startup must not fan
+        # out environment discovery requests when the ID is already known.
+        if self._environment_id:
+            return self._environment_id
+        else:
             resolved = _environment_id_by_exact_name(
                 sandbox, self._project_name, self._environment_name
             )
-            if self._environment_id and self._environment_id != resolved:
-                raise RuntimeError(
-                    "YiCloud Sandbox environment ID/name mismatch: "
-                    f"id={self._environment_id!r}, "
-                    f"name={self._environment_name!r}, "
-                    f"resolved_id={resolved!r}"
-                )
             self._environment_id = resolved
-        else:
-            environment = sandbox.get_sandbox_environment(
-                None,
-                sandbox.models.GetSandboxEnvironmentReq(
-                    ProjectName=self._project_name,
-                    EnvironmentId=self._environment_id,
-                ),
-            )
-            actual_id = str(getattr(environment, "Id", "") or "").strip()
-            if actual_id != self._environment_id:
-                raise RuntimeError(
-                    "YiCloud Sandbox environment lookup mismatch: "
-                    f"expected={self._environment_id!r}, actual={actual_id!r}"
-                )
-            self._environment_name = str(
-                getattr(environment, "Name", "") or ""
-            ).strip()
         return self._environment_id
 
     def _make_sandbox_name(self) -> str:
@@ -2261,6 +2244,32 @@ class YiCloudOpenSandboxEnvironment(BaseEnvironment):
             )
             matches = re.findall(rf"{re.escape(EXIT_MARKER)}(\d+)", stdout)
             return_code = int(matches[-1]) if matches else 1
+            if not matches:
+                # Do not log command text, headers, stdout, or stderr: these
+                # may contain model inputs or credentials. Preserve semantics.
+                logging.getLogger(__name__).error(
+                    "execd_missing_exit_marker sandbox_id=%s timeout_sec=%s "
+                    "event_types=%s error_names=%s stdout_bytes=%s stderr_bytes=%s",
+                    getattr(self, "_sandbox_id", None), effective_timeout_sec,
+                    [event.get("type") for event in events],
+                    [re.sub(r"[^A-Za-z0-9_]", "", str(event.get("error", {}).get("ename", "")))[:80]
+                     for event in events if isinstance(event.get("error"), dict)],
+                    len(stdout.encode()), len(stderr.encode()),
+                )
+                # Do not turn an incomplete execd stream into an unexplained
+                # ordinary shell failure. Keep rc=1, and do not infer a timeout
+                # merely from its configured limit or replay the command.
+                error_names = sorted({
+                    re.sub(r"[^A-Za-z0-9_]", "", str(event["error"].get("ename", "")))[:80]
+                    for event in events if isinstance(event.get("error"), dict)
+                } - {""})
+                diagnostic = (
+                    "[OpenSandbox: command completion was not confirmed; "
+                    f"execd errors={','.join(error_names) or 'unknown'}; "
+                    f"configured timeout={effective_timeout_sec}s. "
+                    "This does not confirm whether the command timed out or stopped.]"
+                )
+                stderr = (stderr + "\n" if stderr else "") + diagnostic
             stdout = re.sub(
                 rf"\n?{re.escape(EXIT_MARKER)}\d+\n?", "", stdout
             )
@@ -2934,18 +2943,56 @@ class YiCloudOpenSandboxEnvironment(BaseEnvironment):
         target.write_bytes(base64.b64decode(result.stdout or "", validate=True))
 
     async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
-        result = await self.exec(
-            f"tar czf - -C {shlex.quote(source_dir)} . | base64 -w0",
-            cwd="/",
-            timeout_sec=300,
-            user="root",
+        # Snapshot once; retry only the transfer, never the verifier or tar.
+        # No pipeline: tar's failure must not be hidden by base64's exit code.
+        remote = f"/tmp/harbor-download-{uuid.uuid4().hex}.tar.gz"
+        quoted = shlex.quote(remote)
+        # execd may emit line text without its newline terminator. Use an
+        # explicit separator absent from both hex and base64, not a newline.
+        fetch = (
+            f"harbor_sha=$(sha256sum {quoted}) && "
+            "printf '%s:' \"${harbor_sha%% *}\" && "
+            f"base64 -w0 {quoted}"
         )
-        if result.return_code != 0:
-            raise RuntimeError(f"failed to download directory {source_dir!r}")
-        target = Path(target_dir)
-        target.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            archive = Path(tmp_dir) / "download.tar.gz"
-            archive.write_bytes(base64.b64decode(result.stdout or "", validate=True))
-            with tarfile.open(archive, "r:gz") as tar:
-                tar.extractall(target, filter="data")
+        create = (
+            f"tar czf {quoted} -C {shlex.quote(source_dir)} . && "
+            f"{fetch}"
+        )
+        try:
+            result = await self.exec(create, cwd="/", timeout_sec=300, user="root")
+            if result.return_code != 0:
+                raise RuntimeError("directory snapshot creation/initial read failed")
+            last_error = "unknown"
+            for attempt in range(3):
+                if attempt:
+                    # Existing outer verifier timeout remains authoritative.
+                    await asyncio.sleep(attempt)
+                    result = await self.exec(fetch, cwd="/", timeout_sec=300, user="root")
+                try:
+                    if result.return_code != 0:
+                        raise ValueError("snapshot read returned nonzero exit code")
+                    checksum, encoded = (result.stdout or "").strip().split(":", 1)
+                    if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+                        raise ValueError("missing snapshot checksum")
+                    data = base64.b64decode(encoded.strip(), validate=True)
+                    if not data or hashlib.sha256(data).hexdigest() != checksum:
+                        raise ValueError("empty or checksum-mismatched snapshot")
+                    # Check tar structure before touching the destination.
+                    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                        members = tar.getmembers()
+                    break
+                except (ValueError, IndexError, tarfile.ReadError, EOFError) as error:
+                    last_error = type(error).__name__
+                    self.logger.warning(
+                        "sandbox_directory_transfer_invalid attempt=%s/3 reason=%s",
+                        attempt + 1, last_error,
+                    )
+            else:
+                raise RuntimeError(f"directory snapshot invalid after 3 reads: {last_error}")
+            target = Path(target_dir)
+            target.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                tar.extractall(target, members=members, filter="data")
+        finally:
+            # Only this call's unique snapshot; preserve all task/verifier files.
+            await asyncio.to_thread(self._cleanup_remote_exec_paths_sync, remote)

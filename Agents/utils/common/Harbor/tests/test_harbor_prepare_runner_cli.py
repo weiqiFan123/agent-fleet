@@ -69,7 +69,7 @@ class RunnerValidationTest(unittest.TestCase):
             "[ \"$3\" = pip ] && echo 25.2 && exit 0\n"
             "[ \"$3\" = PyYAML ] && echo 6.0.3 && exit 0\n"
             "[ \"$3\" = s3cmd ] && echo 2.4.0 && exit 0\n"
-            "[ \"$3\" = yicloud-sdk-python ] && echo 0.3.1 && exit 0\n"
+            "[ \"$3\" = yicloud-sdk-python ] && echo 0.4.1 && exit 0\n"
             "exit 1\n",
         )
 
@@ -84,7 +84,7 @@ class RunnerValidationTest(unittest.TestCase):
                 ("pip", "25.2"),
                 ("PyYAML", "6.0.3"),
                 ("s3cmd", "2.4.0"),
-                ("yicloud-sdk-python", "0.3.1"),
+                ("yicloud-sdk-python", "0.4.1"),
             ],
         )
         invalid = self.root / "invalid.txt"

@@ -228,10 +228,13 @@ while true; do
 
   if [[ -n "$dataset_root" ]]; then
     worklist="$WORKLIST_DIR/$(safe_name "$dataset_root").txt"
+    exec 7>"$worklist.lock"
+    flock 7
     if [[ ! -s "$worklist" ]]; then
       python3 "$RL_SCRIPT_DIR/rl_dataset_worklist.py" "$dataset_root" \
         --output "$worklist" --disabled-task-ids "$RL_DISABLED_TASK_IDS" >> "$WORKER_LOG" 2>&1 || true
     fi
+    flock -u 7
   fi
 
   if [[ "${HARBOR_DRY_RUN:-0}" != "1" ]]; then
@@ -341,7 +344,12 @@ while true; do
       1|true|TRUE|True|yes|YES|Yes|on|ON|On) export HARBOR_FORCE_BUILD=1 ;;
       *) export HARBOR_FORCE_BUILD=0 ;;
     esac
-    bash "$HARBOR_SCRIPT_DIR/harboropik.sh"
+    if [[ "$RL_AGENT" == "Vanillux2Agent" ]]; then
+      export TMAX_MODEL_HEADERS_JSON="$request_headers_json"
+      bash "$HARBOR_SCRIPT_DIR/run_vanillux_trial.sh"
+    else
+      bash "$HARBOR_SCRIPT_DIR/harboropik.sh"
+    fi
   ) 2>&1 | tee "$task_console_log"
   rc=${PIPESTATUS[0]}
   set -e
